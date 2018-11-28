@@ -1,0 +1,511 @@
+---
+title: An Exploratory Analysis of Chicago Crime (2001 to 2018)
+author: Delvin So
+draft: false
+lastmod: '2015-05-13'
+date: '2018-05-13'
+slug: an-exploratory-analysis-of-chicago-crime-2001-to-2018
+categories:
+  - crime
+tags:
+  - R
+  - independent
+summary: "How has crime evolved throughout the years? Where and when does crime commonly occur?"
+---
+
+
+```{r setup, echo = FALSE}
+
+knitr::opts_knit$set(root.dir = "../../../data/chicago-crime/")
+
+knitr::opts_chunk$set(
+	# error = TRUE,
+	tidy = FALSE,
+	fig.align = "CENTER",
+	# fig.asp = 0.62,
+	# fig.width = 7,
+	# fig.asp = 0.75,
+	# fig.width = 4,
+	out.width = "90%",
+	cache = TRUE,
+	dpi = 400
+
+)
+
+```
+
+
+# Introduction
+
+This dataset reflects reported incidents of crime (with the exception of murders where data exists for each victim) that occurred in the City of Chicago from 2001 to 2018, minus the most recent seven days. Data is extracted from the Chicago Police Department's CLEAR (Citizen Law Enforcement Analysis and Reporting) system.
+
+There are over 6 million rows (or records) in this dataset. Using this data, we can answer several questions that might be of interest:
+
+1) How has crime changed over the years?
+2) Are certain offenses more likely to happen during certain times of the day, weekdays, or months?
+3) Furthermore, are certain offenses more likely to occur during specific locations than other types?
+4) What is the relationship between temperature and an offense occuring?
+
+NOTE: This EDA is always a work in progress. Comments and criticism are always welcome! Feel free to contact me on github or by e-mail.
+
+This analysis demonstrates
+
+* Time Series Analyses to identify trends in crime throughout the years
+* Temporal Visualization through heatmaps
+* Hierarchical clustering to group variables with similar patterns to 'pretty' heat maps
+*
+
+## TODO
+
+* Group locations similar, eg. school, CTA, CHA, etc.
+* In depth explanations
+* Which areas of the city have evolved over this time span? GIS with facetted years? District, community areas..
+## Setup
+
+```{r, echo = FALSE, include = TRUE}
+# Include comments
+suppressMessages(require(tidyquant)) # tidy time analyses
+suppressMessages(require(tidyverse))
+suppressMessages(require(lubridate)) # manipulating date variables
+suppressMessages(require(ggplot2))  
+suppressMessages(require(GSODR))    #
+suppressMessages(require(zoo))    #
+suppressMessages(require(scales))
+suppressMessages(require(RColorBrewer))
+suppressMessages(require(broom))
+suppressMessages(require(viridis))
+
+source('helpers.R')
+```
+
+## Cleaning and Preparing the Data
+
+```{r}
+# Reading in crime data, note this is up to 2018/04 ----
+# crimeRaw <- read.csv(file = "data/chicago_2018_04.csv")
+crimeRaw <- readRDS('crimeRaw.RDS')
+# What does the data look like?
+glimpse(crimeRaw)
+
+# Examining the date format so we can process using lubridate
+# Will be critical for temporal analysis
+# head(crimeRaw$Date) # mm/dd/yyyy h/m/s AM/PM
+
+# Cleaning the data and creating appropriate date columns for each observation ----
+crime <- crimeRaw %>%
+  mutate(date = mdy_hms(Date),
+         #date2 = mdy(Date),
+         year = year(date),
+         month = month(date),
+         weekdays = weekdays(date, abbreviate = T),
+         weekdays = factor(weekdays, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")),
+         hour = hour(date),
+         # date in ymd format, convert to date object after subsetting
+         date2 = ymd(str_split_fixed(date, " ", n = 2)[,1]))
+
+
+# Filtering our variables with a reasonable amount of observations - pretties up heatmaps by removing NA's ----
+# We will only subset location and offenses with over 1000 observations
+
+top_loc <- crime %>% group_by(Location.Description) %>%
+  summarize(total = n()) %>%
+  arrange(desc(total)) %>%
+  print()
+
+loc_ss <- top_loc %>%
+  filter(total >= 1000) %>%
+  pull(Location.Description)
+
+top_offenses <- crime %>%
+  group_by(Primary.Type) %>%
+  summarize(total = n()) %>%
+  arrange(desc(total)) #%>% top_n(30)# %>% pull(Location.Description) %>% droplevels(.)
+
+off_ss <- top_offenses %>% filter(total >= 1000) %>% pull(Primary.Type)
+
+# Creating a subset of the data for EDA as not all variables are needed
+crime_eda <- crime %>%
+  select(Primary.Type, Description, Location.Description, Arrest, Domestic, date, year, month, weekdays, hour, date2) %>%
+  filter(Primary.Type %in% off_ss,
+         Location.Description %in% loc_ss)
+
+crime_ss <- crime %>%
+  select(Block, Primary.Type, Description, Location.Description, Arrest, Domestic, Beat, District, Ward, Community.Area,
+         Latitude, Longitude, date, year, month, weekdays, hour, date2) %>%
+  select(Longitude, Latitude, everything())# %>% # placing Long and Lat at front of the df
+  # filter(complete.cases(.))
+
+rm(crime)
+rm(crimeRaw)
+
+```
+
+## Climate Data (WIP - skip)
+
+I'm interested in how temperature plays a role in the number of offenses occuring, I would expect the trend to be linear up to a certain point but who knows..
+
+```{r eval=FALSE, include=FALSE}
+# Retrieving climate data, only a small subset to determine which stations are relevant to chicago
+gsodUS <- get_GSOD(years = 2018, station = NULL, country = 'US', max_missing = NULL, agroclimatology = FALSE)
+
+save.RDS(gsodUS, "gsodUS.RDS")
+gsodUS <- readRDS("gsodUS.RDS") # so I don't need to redownload the GSOD data everytime the markdown is run
+# retrieving relevant stations
+stations <- gsodUS %>%
+  filter(STATE == "IL") %>%
+  filter(str_detect(STN_NAME, "(CHICAGO)")) %>%
+  select(STNID, STN_NAME) %>%
+  pull(STNID) %>%
+  unique(.)
+
+# Retrieving years withn range of the crime data
+
+gsodUS <- get_GSOD(years = 2001:2018, station = stations, country = "US", agroclimatology = FALSE)
+
+gsodIL <- gsodUS %>% mutate(date = ymd(YEARMODA),
+                            year = year(YEARMODA),
+                            month = month(YEARMODA),
+                            weekdays = weekdays(YEARMODA, abbreviate = T),
+                            hour = hour (YEARMODA))
+
+
+```
+
+## Yearly, Monthly and Quarterly Crime Trends - Time Series Analysis
+
+### Daily Incidences and Arrests by Month and Year
+
+```{r}
+  daily_incidences <- crime_ss %>%
+    # we aggregate the data so it follows a day to day format with the count of reports for that day and then perform a rolling sum
+    # recall that date2 is the day of the year in yyyy-mm-dd format
+    group_by(date2) %>%
+    arrange(date2) %>%
+    # we count the total number of incidences that occured for a given day in the year
+    mutate(weekdays = as.factor(weekdays),
+           count = n()) %>%                       
+    distinct(date2, weekdays, count) %>%
+    as.data.frame(.) %>% # tibble doesn't work with zoo(?)
+    # rolling sums using a 28 day window for monthly counts and 365 for yearly
+    mutate(monthlyIncidences = rollsum(count, k = 28, na.pad = TRUE, fill = NA, align = "right"),
+           yearlyIncidences = rollsum(count, k = 365, na.pad = TRUE, fill = NA, align = "right")) #incidences for that day
+
+  daily_arrests <- crime_ss %>%
+    group_by(date2) %>%
+    arrange(date2) %>%
+    filter(Arrest == "true") %>%
+    mutate(weekdays = as.factor(weekdays),
+           count = n()) %>%
+    distinct(date2, weekdays, count) %>%
+    as.data.frame() %>%
+    mutate(monthlyArrests = rollsum(count, k = 28, na.pad = TRUE, fill = NA, align = "right"),
+           yearlyArrests = rollsum(count, k = 365, na.pad = TRUE, fill = NA,  align = "right"))
+
+    # joining the arrests and incidences into one dataframe
+    daily <- left_join(daily_arrests %>%
+                       select(date2, monthlyArrests, yearlyArrests),
+                     daily_incidences %>%
+                       select(date2, monthlyIncidences, yearlyIncidences),
+                     by = "date2") %>%
+    gather(key = monthly, value = roll1, c(monthlyArrests, monthlyIncidences)) %>%
+    gather(key = yearly, value = roll2, c(yearlyArrests, yearlyIncidences))
+
+```
+
+```{r, fig.width = 10, fig.asp = 0.75}
+  # Yearly
+  ggplot(data = data.frame(daily), aes(x = date2, y = roll2)) +
+    geom_line(size = 0.8, aes(linetype = yearly)) +
+    scale_x_date("", date_breaks = "1 year", labels = date_format("20%y")) +
+    scale_y_continuous("Trailing 365 days\n", labels = comma) +
+    title_subtitle("Chicago Yearly Incidences and Arrests", "Based on the city of Chicago's crime data 2001 - 2018") +
+    theme_ds(base_size = 20) +
+    facet_wrap(~ yearly, nrow = 2, scales = "free") +
+    guides(linetype = FALSE)
+
+  # Monthly
+  ggplot(data = data.frame(daily), aes(x = date2, y = roll1)) +
+    geom_line(size = 0.8, aes(linetype = monthly)) +
+    scale_x_date("", date_breaks = "1 year", labels = date_format("20%y")) +
+    scale_y_continuous("Trailing 28 days\n", labels = comma) +#, breaks = seq(0, 45000, by = 5000))
+    title_subtitle("Chicago Monthly Incidences and Arrests", "Based on the city of Chicago's crime data 2001 - 2018") +
+    theme_ds(base_size = 20) +
+    facet_wrap(~ monthly, nrow = 2, scales = "free") +
+    guides(linetype = FALSE)
+```
+
+
+* Yearly
+     + We can see that there has been an overall decline in the number of incidences occuring, dropping from 500 000 to ~ 250 000 since 2002. Likewise, this is reflected in the number of arrests occuring, from 150 000 to 50 000.
+
+* Monthly
+     + Incidences peak during the summer months.
+
+### Daily Incidences and Arrests by Month and Year - By Type
+
+Looking at the yearly rolling sum, we see a decline and plateau in the number of incidences. Let's examine the same trend by type of incidence to see if this is truly the case.
+
+```{r}
+  daily_incidences_type <- crime_ss %>%
+    # Filter out offenses with over 1000 occurences
+    filter(Primary.Type %in% off_ss) %>%
+    group_by(date2, Primary.Type) %>%
+    arrange(date2) %>%
+    mutate(weekdays = as.factor(weekdays),
+           count = n()) %>%
+    distinct(date2, weekdays, count) %>%
+    arrange(Primary.Type, date2) %>%
+    group_by(Primary.Type) %>%
+    # filter(Primary.Type %in% c("ARSON", "ROBBERY", "ASSAULT")) %>%
+    tq_mutate(
+      select = count, mutate_fun = rollsum, k  = 365, align = "right", fill = NA, col_rename = "yearlyIncidences"
+    ) %>%
+    tq_mutate(
+      select = count, mutate_fun = rollsum, k = 91, align  = "right", fill = NA, col_rename = "quarterlyIncidences"
+    ) %>%
+    tq_mutate(
+      select = count, mutate_fun = rollsum, k = 28, align  = "right", fill = NA, col_rename = "monthlyIncidences"
+    )
+
+
+```
+
+```{r, fig.width = 12, fig.asp = 0.75}
+  # Yearly
+  ggplot(data = data.frame(daily_incidences_type),
+         aes(x = date2, y = yearlyIncidences)) +
+    geom_line(size = 0.4) +
+    scale_x_date("", date_breaks = "2 years", labels = date_format("20%y")) +
+    scale_y_continuous("Trailing 365 days\n", labels = comma) +#, breaks = seq(0, 45000, by = 5000))
+    facet_wrap(~ Primary.Type, scales = "free", labeller = label_wrap_gen()) +
+    guides(linetype = FALSE) +
+    title_subtitle("Chicago Yearly Incidences and Arrests", "Based on the city of Chicago's crime data 2001 - 2018") +
+    theme_ds(base_size = 16) +
+    theme(strip.text = element_text(size = 8))
+
+  # Quarterly
+  ggplot(data = data.frame(daily_incidences_type),
+         aes(x = date2, y = quarterlyIncidences)) +
+    geom_line(size = 0.4) +
+    # scale_x_date("", date_breaks = "1 year", labels = date_format("20%y")) +
+    scale_x_date("", date_breaks = "2 years", labels = date_format("20%y")) +
+    scale_y_continuous("Trailing 91 days\n", labels = comma) +#, breaks = seq(0, 45000, by = 5000))
+    facet_wrap(~ Primary.Type, scales = "free", labeller = label_wrap_gen()) +
+    guides(linetype = FALSE) +
+    title_subtitle("Chicago Quarterly Incidences and Arrests", "Based on the city of Chicago's crime data 2001 - 2018") +
+    theme_ds(base_size = 16) +
+    theme(strip.text = element_text(size = 8))
+
+
+# Monthly
+  # ggplot(data = data.frame(daily_incidences_type) %>% filter(date2 >= '2015-01-01'),
+  #        aes(x = date2, y = monthlyIncidences)) +
+  #   geom_line(size = 0.4) +
+  #   # scale_x_date("", date_breaks = "1 year", labels = date_format("20%y")) +
+  #   scale_x_date("", date_breaks = "1 year", labels = date_format("20%y")) +
+  #   scale_y_continuous("Trailing 28 days\n", labels = comma) +#, breaks = seq(0, 45000, by = 5000))
+  #   facet_wrap(~ Primary.Type, scales = "free") +
+  #   guides(linetype = FALSE) +
+  #   title_subtitle("Chicago Monthly Incidences and Arrests", "Based on the city of Chicago's crime data 2001 - 2018") +
+  #   theme_ds(base_size = 12)
+```
+
+* Monthly
+     + The monthly trends can be deceptive due to the volatility of some types due to low sample size so we will ignore this for now (correct me if I'm wrong).
+
+* Quarterly
+     + At a glance, we can see that assault, criminal sexual assault, deceptive practices, robbery, theft and weapons violations are on the rise. Prostitution, narcotics and public peace violations have declined and remain low for several years. Furthermore, we can see a similar upward trend with deceptive practices and interference with public officers. Overall, we can see that although there has been a decline in most offenses, the more dangerous offenses have been on a rise which is worrying.
+
+* Yearly
+     + There is a decline in several offenses, however we can see that the number of homicides has been steadily increasing the past few years and correspondingly, so have weapon violations.
+
+## Crime Records by Time, Location and Type - Temporal Analysis
+
+### Incidences by Day of the Week
+
+```{r, fig.width = 8, fig.asp = 0.75, out.width = "60%"}
+  by_dow <- daily_incidences %>%  
+    group_by(weekdays) %>%
+    summarize(avg = mean(count)) %>%
+    mutate(weekdays = factor(weekdays, levels = c("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")),
+
+    # order is reversed when we flip the axes, so in turn we flip the factor levels to keep it in line with the 'Mon - Sun' ordering
+    weekdays = factor(weekdays, levels = rev(levels(weekdays))))
+
+  ggplot(data = by_dow, aes(x = weekdays, y = avg)) +
+    geom_bar(stat = "identity", colour = "black") +
+    scale_y_continuous("Average", limits = c(0, 1200)) +
+    scale_x_discrete("") +
+    coord_flip() +
+    theme_ds(base_size = 20)  +
+    title_subtitle("Average # of Incidences by Day of Week", "Based on the city of Chicago's crime data 2001 - 2018") +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 9),
+          plot.subtitle = element_text(hjust = 0.5, size = 9))
+
+```
+
+
+There doesn't appear to be any differences between weekdays and weekends..
+
+Let's dig a little deeper and look at the time of day in addition to the day of the week.
+
+### Incidences by Day of the Week and Hour
+
+
+```{r, fig.width = 8, fig.asp = 0.75, center = "TRUE", out.width = "80%"}
+  by_dow_hour <- crime_ss %>%
+    mutate(weekday = ifelse(weekdays %in% c("Sun", "Sat"), "Weekends", "Weekday")) %>%
+    select(date, date2, weekday, hour, Primary.Type, weekdays, Arrest) %>%
+    # filter(Arrest == "true") %>%
+    group_by(weekdays, hour) %>%
+    summarize(inci = n(),
+              num_days = n_distinct(date2))  %>%
+    mutate(timestamp_for_x_axis = as.POSIXct(hour * 3600, origin = "1970-01-01", tz = "UTC"),
+           avg = inci / num_days) %>%
+    group_by(weekdays) %>%
+    mutate(inci.norm = scale(inci, scale = TRUE, center = TRUE),
+           inci.norm2 = inci / sum(inci) * 100)
+
+  ggplot(by_dow_hour, aes(x = weekdays, y = timestamp_for_x_axis)) +
+    # geom_raster(aes(fill = avg)) +
+    geom_tile(aes(fill = inci.norm2), size = 0.01, colour = "gray20", alpha = 0.8) +
+    scale_y_datetime("", labels = date_format("%l %p"), date_breaks = "1 hour", expand = c(0, 0)) +
+    scale_x_discrete("", expand = c(0, 0)) +
+    # scale_fill_distiller("Proportion", palette = "GnBu", direction = -1) +
+    # PuBuGn, GnBu
+    # coord_flip() +
+    # scale_x_reverse() +
+    title_subtitle("Average Incidences by Hour of the Week",
+                      "Based on the city of Chicago's crime data 2001 - 2018") +
+    theme_hm(base_size = 20) +
+    scale_fill_viridis(
+      option = "viridis",
+      direction = -1,
+      name = "Avg") +
+    # theme(legend.position = 'bottom')
+    theme_colbar(location = "top")
+
+```
+
+It appears that most incidences occur during lunch time on weekdays, weekends around midnight and friday night from 3pm onwards.
+
+Next, we'll break down the types of incidences by the time of day. This will help us determine whether certain crimes occur more frequently during certain times of the day. For this analysis, we will 'normalize' the counts by time so that it's expressed as a proportion of the total number of incidences.
+
+### Type of Incidences by Hour
+
+```{r}
+type_by_hour <- crime_eda %>%
+  select(date, date2, hour, Primary.Type, weekdays) %>%
+  group_by(hour, Primary.Type) %>%
+  summarize(inci = n(), # counting total number of incidences
+            num_days = n_distinct(date2)) %>% # number of unique days where the incidences by hour occured
+  mutate(timestamp_for_x_axis = as.POSIXct(hour * 3600, origin = "1970-01-01", tz = "UTC"),
+         avg = (inci / num_days)) %>%
+  group_by(Primary.Type) %>%
+  mutate(inci.norm = scale(inci, center = TRUE, scale = TRUE),
+         inci.norm2 = (inci / sum(inci) * 100))
+```
+
+Ideally, we want to sort the incidences so that there is a pattern to how they are grouped. We can use hierarchical clustering to group variables with similar crime patterns (refer to 'helpers.R' for more information for how the function works).
+
+```{r, fig.width = 9 , fig.asp = 0.75, fig.align = "CENTER", out.width = "90%"}
+tbh_order <- clust_sort(df = type_by_hour,
+                    x = "hour",
+                    y = "Primary.Type",
+                    stat = "inci.norm2")
+
+ggplot(tbh_order, aes(y = timestamp_for_x_axis, x = Primary.Type)) +
+  # geom_raster(aes(fill = inci.norm2)) +
+  # geom_tile(aes(fill = inci.norm2), size = 10, alpha = 0.8) +
+  geom_tile(aes(fill = inci.norm2), size = 0.01, colour = "gray20", alpha = 0.8) +
+  scale_y_datetime("", labels = date_format("%l %p"), date_breaks = "1 hour", expand = c(0, 0)) +
+  scale_x_discrete("", expand = c(0, 0)) +
+  # scale_fill_distiller("", palette = "GnBu", direction = -1,) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  coord_flip() +
+  scale_fill_viridis(
+    option = "viridis",
+    direction = -1,
+    breaks = c(0, 2.5, 5, 7.5, 10, 12.5),
+    labels  = c('0', '2.5', '5', '7.5', '10', '12.5'),
+    name = "Proportion (%)") +
+  title_subtitle("Heatmap of Incidences by Time of Day", "Based on the city of Chicago's crime data 2001 - 2018") +
+  theme(legend.position = 'bottom') +
+  theme_hm(base_size = 20) +
+  theme_colbar(location  = 'bottom') #+
+
+```
+
+We will also look at patterns in how crime occurs throughout the day by different locations.
+
+### Occurences - Location by Time of Day
+
+```{r, fig.width = 11, fig.asp = 0.75, fig.align = "CENTER", out.width= "100%"}
+ location_by_hour <- crime_eda %>%
+    select(date, date2, hour, Location.Description, weekdays) %>%
+    group_by(hour, Location.Description) %>%
+    summarize(inci = n(), # number of incidences that occur by either weekday or weekend, by hour
+              num_days = n_distinct(date2)) %>% # number of unique days where the incidences by hour occured
+    mutate(timestamp_for_x_axis = as.POSIXct(hour * 3600, origin = "1970-01-01", tz = "UTC"),
+           avg = (inci / num_days)) %>%
+    group_by(Location.Description) %>%
+    mutate(inci.norm = scale(inci, center = TRUE, scale = TRUE),
+           inci.norm2 = inci / sum(inci) * 100)
+
+
+  lbh <- clust_sort(df = location_by_hour %>% filter(!is.na(Location.Description)),
+                    x = 'hour', y = 'Location.Description', stat = 'inci.norm2')
+
+  ggplot(lbh, aes(y = timestamp_for_x_axis, x = Location.Description)) +
+    # geom_tile(aes(fill = inci.norm2), size = 10, alpha = 0.8) +
+    geom_tile(aes(fill = inci.norm2), size = 0.01, colour = "gray20", alpha = 0.8) +
+
+    scale_y_datetime("", labels = date_format("%l %p"), date_breaks = "1 hour", expand = c(0, 0)) +
+    scale_x_discrete(expand = c(0, 0)) +
+    # scale_fill_distiller("", palette = "GnBu", direction = -1) +
+    theme_hm(base_size = 20) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.text.y = element_text(size = 6)) +
+    coord_flip() +
+    scale_fill_viridis(
+      option = "viridis",
+      direction = -1,
+      breaks = c(0, 5, 10, 15, 20),
+      labels  = c('0', '5', '10', '15', '20'),
+      name = "Proportion (%)") +
+    title_subtitle("Frequency of Incidences - Location by Time of Day", "Based on the city of Chicago's crime data 2001 - 2018") +
+    theme(legend.position = 'bottom') +
+    theme_colbar(location = 'bottom')
+
+```
+
+
+## Temperature vs Incidence Rates
+
+WIP
+
+```{r eval=FALSE}
+temp_by_inci <- gsodIL %>%
+  # filter(year %in% c(2005, 2006, 2007)) %>%
+  # selecting relevant variables
+  select(YEARMODA, year, month, weekdays, hour, TEMP, TEMP_CNT, starts_with("I"), STN_NAME) %>%
+  # joining with crime dataset on date2 (day of the year)
+  left_join(
+    crime_ss %>%
+      # filter(year %in% c(2005, 2006, 2007)) %>%
+      select(Primary.Type, Description, Location.Description, Arrest, Domestic, date, year, month, weekdays, hour, date2) %>%
+      # filter(Arrest == "true") %>%
+      group_by(date2) %>% count(),
+    by = c('YEARMODA' = 'date2')
+  )
+
+tbi <- temp_by_inci %>%
+  mutate(TEMP = round2(TEMP, 0)) %>%
+  aggregate(n ~ TEMP, data = ., FUN = mean)
+```
+```{r, eval = FALSE, fig.width = 6, fig.asp = 0.75, out.width = "70%"}
+ggplot(tbi, aes(x = TEMP, y = n)) +
+  geom_point(alpha = 1, size = 1) +
+  geom_smooth(method = "lm", formula = y~x, se = FALSE, colour = "black", size = 0.5)  + #line of best fit
+  theme_ds(base_size = 20)
+```
